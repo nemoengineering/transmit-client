@@ -15,6 +15,7 @@ export const HookEvent = {
   OnSubscribeFailed: 'onSubscribeFailed',
   OnSubscription: 'onSubscription',
   OnUnsubscription: 'onUnsubscription',
+  OnReconnected: 'onReconnected',
 } as const
 
 export type HookEvent = (typeof HookEvent)[keyof typeof HookEvent]

@@ -27,6 +27,9 @@ interface TransmitOptions {
   onSubscribeFailed?: (response: Response) => void
   onSubscription?: (channel: string) => void
   onUnsubscription?: (channel: string) => void
+  onReconnected?: (attempt: number) => void
+  reconnectTimeoutMs?: number
+  pingTimeoutMs?: number
 }
 
 export class Transmit {
@@ -103,6 +106,14 @@ export class Transmit {
       options.maxReconnectAttempts = 5
     }
 
+    if (typeof options.pingTimeoutMs === 'undefined') {
+      options.pingTimeoutMs = 1000 * 60 * 2 // 2 minutes
+    }
+
+    if (typeof options.reconnectTimeoutMs === 'undefined') {
+      options.reconnectTimeoutMs = 5000
+    }
+
     this.#uid = options.uidGenerator()
     this.#eventTarget = options.eventTargetFactory()
     this.#hooks = new Hook()
@@ -136,6 +147,10 @@ export class Transmit {
       this.#hooks.register(HookEvent.OnUnsubscription, options.onUnsubscription)
     }
 
+    if (options.onReconnected) {
+      this.#hooks.register(HookEvent.OnReconnected, options.onReconnected)
+    }
+
     this.#options = options
     this.#connect()
   }
@@ -150,7 +165,6 @@ export class Transmit {
 
     const url = new URL(`${this.#options.baseUrl}/__transmit/events`)
     url.searchParams.append('uid', this.#uid)
-
     this.#eventSource = this.#options.eventSourceFactory!(url, {
       withCredentials: true,
     })
@@ -159,7 +173,11 @@ export class Transmit {
     this.#eventSource.addEventListener('error', this.#onError.bind(this))
     this.#eventSource.addEventListener('open', () => {
       this.#changeStatus(TransmitStatus.Connected)
+      if (this.#reconnectAttempts > 0) {
+        this.#hooks.onReconnected(this.#reconnectAttempts)
+      }
       this.#reconnectAttempts = 0
+      this.#handlePing()
 
       for (const subscription of this.#subscriptions.values()) {
         if (subscription.isCreated) {
@@ -171,6 +189,11 @@ export class Transmit {
 
   #onMessage(event: MessageEvent) {
     const data = JSON.parse(event.data)
+    if (data.channel === '$$transmit/ping') {
+      this.#handlePing()
+      return
+    }
+
     const subscription = this.#subscriptions.get(data.channel)
 
     if (typeof subscription === 'undefined') {
@@ -185,13 +208,38 @@ export class Transmit {
     }
   }
 
+  #pingTimeout: NodeJS.Timeout | undefined
+
+  #handlePing() {
+    if (this.#status !== TransmitStatus.Connected) return
+
+    clearTimeout(this.#pingTimeout)
+    this.#pingTimeout = setTimeout(() => {
+      this.close()
+      this.#changeStatus(TransmitStatus.Initializing)
+
+      this.#reconnectWithTimeout()
+    }, this.#options.pingTimeoutMs)
+  }
+
+  #waitingForReconnect = false
+  #reconnectWithTimeout() {
+    if (this.#waitingForReconnect) return
+
+    this.#waitingForReconnect = true
+
+    setTimeout(() => {
+      this.#connect()
+      this.#waitingForReconnect = false
+    }, this.#options.reconnectTimeoutMs)
+  }
+
   #onError() {
     if (this.#status !== TransmitStatus.Reconnecting) {
       this.#changeStatus(TransmitStatus.Disconnected)
     }
 
     this.#changeStatus(TransmitStatus.Reconnecting)
-
     this.#hooks.onReconnectAttempt(this.#reconnectAttempts + 1)
 
     if (
@@ -206,6 +254,8 @@ export class Transmit {
     }
 
     this.#reconnectAttempts++
+
+    this.#reconnectWithTimeout()
   }
 
   subscription(channel: string) {

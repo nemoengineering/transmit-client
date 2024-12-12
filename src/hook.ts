@@ -63,4 +63,10 @@ export class Hook {
 
     return this
   }
+
+  onReconnected(attempt: number) {
+    this.#handlers.get(HookEvent.OnReconnected)?.forEach((handler) => handler(attempt))
+
+    return this
+  }
 }
